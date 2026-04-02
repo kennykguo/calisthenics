@@ -1,0 +1,6 @@
+[alias]
+check-embedded = "check --target thumbv7em-none-eabihf --no-default-features --features stm32f446re --bin stm32f446re"
+build-embedded = "build --target thumbv7em-none-eabihf --release --no-default-features --features stm32f446re --bin stm32f446re"
+
+[target.thumbv7em-none-eabihf]
+rustflags = ["-C", "link-arg=-Tlink.x"]
