@@ -1,0 +1,10 @@
+# ABOUTME: Exercises the host-side arm CLI against the calibrated firmware without leaving the safe envelope.
+# ABOUTME: Clears faults, arms, checks status, cycles the gripper, returns home, and reports status again.
+
+clear-fault
+arm
+status
+close
+open
+home
+status

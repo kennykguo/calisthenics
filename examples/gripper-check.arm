@@ -1,0 +1,19 @@
+# ABOUTME: Isolates gripper actuation so the next hardware check only exercises PB1 and the claw.
+# ABOUTME: Uses host-side note markers so the close and open steps are obvious in terminal output.
+
+clear-fault
+arm
+status
+
+note close gripper
+close
+wait 1000
+status
+
+note open gripper
+open
+wait 1000
+status
+
+home
+status

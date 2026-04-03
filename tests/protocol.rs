@@ -14,6 +14,7 @@ fn parses_basic_commands() {
     assert_eq!(parse_command("ARM"), Ok(Command::Arm));
     assert_eq!(parse_command("DISARM"), Ok(Command::Disarm));
     assert_eq!(parse_command("HEARTBEAT"), Ok(Command::Heartbeat));
+    assert_eq!(parse_command("STATUS"), Ok(Command::Status));
     assert_eq!(parse_command("CLEAR_FAULT"), Ok(Command::ClearFault));
     assert_eq!(parse_command("OPEN_GRIPPER"), Ok(Command::OpenGripper));
     assert_eq!(parse_command("CLOSE_GRIPPER"), Ok(Command::CloseGripper));
@@ -124,7 +125,10 @@ fn gripper_macros_use_the_calibrated_positions() {
 
     controller.handle_command(0, Command::Arm).unwrap();
     controller.handle_command(0, Command::OpenGripper).unwrap();
-    assert_eq!(controller.snapshot().target_deg[Joint::Gripper.index()], 120);
+    assert_eq!(
+        controller.snapshot().target_deg[Joint::Gripper.index()],
+        120
+    );
 
     controller.handle_command(1, Command::CloseGripper).unwrap();
     assert_eq!(controller.snapshot().target_deg[Joint::Gripper.index()], 60);

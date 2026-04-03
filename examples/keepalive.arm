@@ -1,0 +1,7 @@
+# ABOUTME: Verifies that host-side waits keep the STM32 heartbeat alive past the watchdog timeout.
+# ABOUTME: Arms the controller, waits 2.5 seconds, and checks that the final status remains fault-free.
+
+clear-fault
+arm
+wait 2500
+status

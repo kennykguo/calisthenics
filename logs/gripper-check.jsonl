@@ -1,0 +1,13 @@
+{"t_ms":2,"kind":"ok","command":"clear-fault"}
+{"t_ms":4,"kind":"ok","command":"arm"}
+{"t_ms":16,"kind":"status","command":"status","seq":225,"armed":true,"fault":"NONE","moving":false,"active":"NONE","voltage_mv":5148,"current":[90,90,100,120],"target":[90,90,100,120]}
+{"t_ms":16,"kind":"note","text":"close gripper"}
+{"t_ms":1760,"kind":"status","command":"close","seq":229,"armed":true,"fault":"NONE","moving":false,"active":"NONE","voltage_mv":5138,"current":[90,90,100,60],"target":[90,90,100,60]}
+{"t_ms":2760,"kind":"status","command":"wait","seq":231,"armed":true,"fault":"NONE","moving":false,"active":"NONE","voltage_mv":5150,"current":[90,90,100,60],"target":[90,90,100,60]}
+{"t_ms":2772,"kind":"status","command":"status","seq":232,"armed":true,"fault":"NONE","moving":false,"active":"NONE","voltage_mv":5132,"current":[90,90,100,60],"target":[90,90,100,60]}
+{"t_ms":2772,"kind":"note","text":"open gripper"}
+{"t_ms":4509,"kind":"status","command":"open","seq":236,"armed":true,"fault":"NONE","moving":false,"active":"NONE","voltage_mv":5148,"current":[90,90,100,120],"target":[90,90,100,120]}
+{"t_ms":5509,"kind":"status","command":"wait","seq":238,"armed":true,"fault":"NONE","moving":false,"active":"NONE","voltage_mv":5144,"current":[90,90,100,120],"target":[90,90,100,120]}
+{"t_ms":5521,"kind":"status","command":"status","seq":239,"armed":true,"fault":"NONE","moving":false,"active":"NONE","voltage_mv":5130,"current":[90,90,100,120],"target":[90,90,100,120]}
+{"t_ms":5536,"kind":"status","command":"home","seq":240,"armed":true,"fault":"NONE","moving":false,"active":"NONE","voltage_mv":5130,"current":[90,90,100,120],"target":[90,90,100,120]}
+{"t_ms":5548,"kind":"status","command":"status","seq":241,"armed":true,"fault":"NONE","moving":false,"active":"NONE","voltage_mv":5130,"current":[90,90,100,120],"target":[90,90,100,120]}

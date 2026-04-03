@@ -30,7 +30,6 @@ use stm32f4xx_hal::{
 const UART_BAUD_RATE: u32 = 115_200;
 const UART_RX_QUEUE_CAPACITY: usize = 128;
 const CONTROL_PERIOD_MS: u32 = 20;
-const STATUS_PERIOD_MS: u32 = 100;
 const LOOP_DELAY_MS: u32 = 1;
 const SERVO_RAIL_SAMPLE_PERIOD_MS: u32 = 100;
 const SERVO_PWM: ServoPwmConfig = ServoPwmConfig {
@@ -159,11 +158,8 @@ fn main() -> ! {
     let mut adc = Adc::new(dp.ADC1, true, AdcConfig::default(), &mut rcc);
 
     let mut platform = BoardPlatform::new(tx, base, shoulder, elbow, gripper);
-    let mut executor = Executor::<64>::new(
-        ArmConfig::f446re_mg90s(),
-        CONTROL_PERIOD_MS,
-        STATUS_PERIOD_MS,
-    );
+    let mut executor =
+        Executor::<64>::new_without_periodic_status(ArmConfig::f446re_mg90s(), CONTROL_PERIOD_MS);
     let mut delay = cp.SYST.delay(&rcc.clocks);
     let mut now_ms = 0_u32;
     let mut last_servo_rail_sample_ms = 0_u32;

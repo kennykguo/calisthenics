@@ -22,6 +22,7 @@ impl Runtime {
 
     pub fn process_line(&mut self, now_ms: u32, line: &str) -> Response {
         match parse_command(line) {
+            Ok(crate::Command::Status) => self.status(),
             Ok(command) => match self.controller.handle_command(now_ms, command) {
                 Ok(()) => Response::Ack,
                 Err(error) => Response::Error(ResponseError::Command(error)),

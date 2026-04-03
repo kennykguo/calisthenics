@@ -39,6 +39,25 @@ fn reports_parse_and_command_errors() {
 }
 
 #[test]
+fn returns_status_snapshots_for_explicit_status_requests() {
+    let mut runtime = Runtime::new(test_config());
+
+    runtime.process_line(0, "ARM");
+    runtime.process_line(1, "MOVE BASE 100");
+    runtime.observe_servo_voltage_mv(5000);
+    runtime.tick(10);
+
+    assert_eq!(
+        render_response(&runtime.process_line(11, "STATUS")),
+        "STATUS seq=0 armed=1 fault=NONE moving=1 active=BASE voltage_mv=5000 current=91,90,100,120 target=100,90,100,120"
+    );
+    assert_eq!(
+        render_response(&runtime.process_line(12, "STATUS")),
+        "STATUS seq=1 armed=1 fault=NONE moving=1 active=BASE voltage_mv=5000 current=91,90,100,120 target=100,90,100,120"
+    );
+}
+
+#[test]
 fn emits_status_with_monotonic_sequence_numbers() {
     let mut runtime = Runtime::new(test_config());
 

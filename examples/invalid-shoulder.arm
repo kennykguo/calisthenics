@@ -1,0 +1,4 @@
+# ABOUTME: Verifies that host-side script preflight rejects commands outside calibrated arm limits.
+# ABOUTME: Uses a shoulder angle below the known safe minimum so armctl check fails before any motion.
+
+joint shoulder 40

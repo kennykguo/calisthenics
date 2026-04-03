@@ -1,0 +1,27 @@
+# ABOUTME: Exercises each calibrated joint inside the safe working envelope with host-side waits.
+# ABOUTME: Uses only validated positions so the next step is physical observation rather than parser debugging.
+
+clear-fault
+arm
+status
+
+joint base 120
+wait 500
+joint base 90
+wait 500
+
+joint shoulder 100
+wait 500
+joint shoulder 90
+wait 500
+
+joint elbow 110
+wait 500
+joint elbow 100
+wait 500
+
+close
+wait 500
+open
+home
+status

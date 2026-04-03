@@ -65,7 +65,10 @@ fn clamps_shoulder_targets_to_the_calibrated_minimum() {
     let clamped = controller.queue_target(Joint::Shoulder, 40).unwrap();
 
     assert_eq!(clamped, 50);
-    assert_eq!(controller.snapshot().target_deg[Joint::Shoulder.index()], 50);
+    assert_eq!(
+        controller.snapshot().target_deg[Joint::Shoulder.index()],
+        50
+    );
 }
 
 #[test]
@@ -89,7 +92,10 @@ fn allows_gripper_to_open_to_one_hundred_twenty_degrees() {
     let clamped = controller.queue_target(Joint::Gripper, 120).unwrap();
 
     assert_eq!(clamped, 120);
-    assert_eq!(controller.snapshot().target_deg[Joint::Gripper.index()], 120);
+    assert_eq!(
+        controller.snapshot().target_deg[Joint::Gripper.index()],
+        120
+    );
 }
 
 #[test]

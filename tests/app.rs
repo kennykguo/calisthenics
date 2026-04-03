@@ -95,3 +95,24 @@ fn drives_control_ticks_and_periodic_status() {
         "STATUS seq=0 armed=1 fault=NONE moving=1 active=BASE voltage_mv=5000 current=95,90,100,120 target=100,90,100,120"
     );
 }
+
+#[test]
+fn can_disable_periodic_status_for_polled_links() {
+    let mut app = App::<32>::new_without_periodic_status(test_config(), 20);
+
+    feed_line(&mut app, 0, "ARM");
+    feed_line(&mut app, 0, "MOVE BASE 100");
+    app.observe_servo_voltage_mv(5000);
+
+    assert!(app.poll(20).is_none());
+    assert!(app.poll(100).is_none());
+
+    let status = feed_line(&mut app, 110, "STATUS");
+
+    assert_eq!(
+        status,
+        Some(String::from(
+            "STATUS seq=0 armed=1 fault=NONE moving=1 active=BASE voltage_mv=5000 current=95,90,100,120 target=100,90,100,120"
+        ))
+    );
+}

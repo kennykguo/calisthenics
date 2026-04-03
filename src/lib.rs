@@ -1,9 +1,11 @@
 // ABOUTME: Defines the firmware safety core for the STM32 arm controller.
 // ABOUTME: Models arming, heartbeat, joint limits, and staged joint motion without hardware access.
 
-#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(any(test, feature = "host")), no_std)]
 
 mod app;
+#[cfg(feature = "host")]
+mod arm_session;
 mod byte_queue;
 mod executor;
 mod protocol;
@@ -13,6 +15,8 @@ mod servo_rail;
 mod status;
 
 pub use app::App;
+#[cfg(feature = "host")]
+pub use arm_session::{ArmPose, ArmRequest, ArmSession, ArmStatus, parse_status_line};
 pub use byte_queue::ByteQueue;
 pub use executor::{Executor, Platform};
 pub use protocol::{Command, ParseError, parse_command};
@@ -238,6 +242,7 @@ impl ArmController {
                 self.heartbeat(now_ms);
                 Ok(())
             }
+            Command::Status => Ok(()),
             Command::ClearFault => self.clear_fault(now_ms),
             Command::Home => {
                 self.reset_motion_plan();

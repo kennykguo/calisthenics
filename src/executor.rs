@@ -20,6 +20,12 @@ impl<const N: usize> Executor<N> {
         }
     }
 
+    pub fn new_without_periodic_status(config: ArmConfig, control_period_ms: u32) -> Self {
+        Self {
+            app: App::new_without_periodic_status(config, control_period_ms),
+        }
+    }
+
     pub fn receive_byte<P: Platform>(&mut self, platform: &mut P, now_ms: u32, byte: u8) {
         if let Some(response) = self.app.receive_byte(now_ms, byte) {
             self.emit_response(platform, &response);

@@ -7,13 +7,25 @@ pub struct App<const N: usize> {
     runtime: Runtime,
     line_buffer: LineBuffer<N>,
     control_period_ms: u32,
-    status_period_ms: u32,
+    status_period_ms: Option<u32>,
     last_control_ms: u32,
     last_status_ms: u32,
 }
 
 impl<const N: usize> App<N> {
     pub fn new(config: ArmConfig, control_period_ms: u32, status_period_ms: u32) -> Self {
+        Self::new_with_optional_status(config, control_period_ms, Some(status_period_ms))
+    }
+
+    pub fn new_without_periodic_status(config: ArmConfig, control_period_ms: u32) -> Self {
+        Self::new_with_optional_status(config, control_period_ms, None)
+    }
+
+    fn new_with_optional_status(
+        config: ArmConfig,
+        control_period_ms: u32,
+        status_period_ms: Option<u32>,
+    ) -> Self {
         Self {
             runtime: Runtime::new(config),
             line_buffer: LineBuffer::new(),
@@ -49,9 +61,11 @@ impl<const N: usize> App<N> {
             self.runtime.tick(self.last_control_ms);
         }
 
-        if now_ms.saturating_sub(self.last_status_ms) >= self.status_period_ms {
-            self.last_status_ms = self.last_status_ms.saturating_add(self.status_period_ms);
-            return Some(self.runtime.status());
+        if let Some(status_period_ms) = self.status_period_ms {
+            if now_ms.saturating_sub(self.last_status_ms) >= status_period_ms {
+                self.last_status_ms = self.last_status_ms.saturating_add(status_period_ms);
+                return Some(self.runtime.status());
+            }
         }
 
         None
