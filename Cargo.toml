@@ -28,3 +28,8 @@ required-features = ["stm32f446re"]
 name = "armctl"
 path = "src/bin/armctl.rs"
 required-features = ["host"]
+
+[[bin]]
+name = "armd"
+path = "src/bin/armd.rs"
+required-features = ["host"]

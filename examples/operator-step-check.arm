@@ -1,0 +1,14 @@
+# ABOUTME: Exercises the Python arm operator over one persistent controller connection.
+# ABOUTME: Clears faults, arms, idles past the watchdog window, nudges the shoulder, and returns home.
+
+clear-fault
+arm
+status
+wait 2500
+status
+note nudge shoulder forward
+step shoulder 5
+wait 500
+note return shoulder home
+step shoulder -5
+status

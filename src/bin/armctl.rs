@@ -3,7 +3,7 @@
 
 use std::{
     fs::{self, File},
-    io::Write,
+    io::{self, BufRead, Write},
     path::Path,
     time::Instant,
 };
@@ -12,6 +12,7 @@ use arm_firmware::{ArmConfig, ArmPose, ArmSession, ArmStatus, Fault, Joint};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum CliCommand {
+    Serve,
     RunScript(String),
     RecordScript {
         script_path: String,
@@ -48,6 +49,18 @@ enum Invocation {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OutputMode {
+    Text,
+    Json,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ParsedRequest {
+    command: CliCommand,
+    request_id: Option<String>,
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("{error}");
@@ -57,7 +70,8 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let config = ArmConfig::f446re_mg90s();
-    match parse_invocation(std::env::args().skip(1).collect())? {
+    let (args, output_mode) = split_output_mode(std::env::args().skip(1).collect());
+    match parse_invocation(args)? {
         Invocation::Offline(CliCommand::Limits) => {
             println!("{}", render_limits(ArmConfig::f446re_mg90s()))
         }
@@ -81,12 +95,19 @@ fn run() -> Result<(), String> {
         }
         Invocation::Online {
             device_path,
+            command: CliCommand::Serve,
+        } => {
+            let mut session = ArmSession::connect(&device_path)?;
+            serve_commands(&mut session, output_mode)?;
+        }
+        Invocation::Online {
+            device_path,
             command: CliCommand::RunScript(script_path),
         } => {
             let commands = load_script_commands(&script_path, config)?;
             let mut session = ArmSession::connect(&device_path)?;
             for command in &commands {
-                execute_command(&mut session, command)?;
+                execute_command(&mut session, command, output_mode, None)?;
             }
         }
         Invocation::Online {
@@ -98,7 +119,7 @@ fn run() -> Result<(), String> {
                 },
         } => {
             let mut session = ArmSession::connect(&device_path)?;
-            run_script_with_log(&mut session, &script_path, &log_path)?;
+            run_script_with_log(&mut session, &script_path, &log_path, output_mode)?;
         }
         Invocation::Online {
             device_path,
@@ -106,11 +127,20 @@ fn run() -> Result<(), String> {
         } => {
             validate_command(&command, config)?;
             let mut session = ArmSession::connect(&device_path)?;
-            execute_command(&mut session, &command)?;
+            execute_command(&mut session, &command, output_mode, None)?;
         }
     }
 
     Ok(())
+}
+
+fn split_output_mode(mut args: Vec<String>) -> (Vec<String>, OutputMode) {
+    if args.last().map(String::as_str) == Some("--json") {
+        let _ = args.pop();
+        (args, OutputMode::Json)
+    } else {
+        (args, OutputMode::Text)
+    }
 }
 
 fn parse_invocation(args: Vec<String>) -> Result<Invocation, String> {
@@ -133,7 +163,7 @@ fn parse_invocation(args: Vec<String>) -> Result<Invocation, String> {
 
 fn usage() -> String {
     String::from(
-        "usage: cargo run --bin armctl -- <limits|summarize <log.jsonl>|check <script>|<serial-device> <status|clear-fault|arm|disarm|home|open|close|wait <ms>|note <text...>|joint <joint> <deg>|pose <base> <shoulder> <elbow> <gripper>|run <script>|record <script> <log.jsonl>>>",
+        "usage: cargo run --bin armctl -- <limits|summarize <log.jsonl>|check <script>|<serial-device> <serve|status|clear-fault|arm|disarm|home|open|close|wait <ms>|note <text...>|joint <joint> <deg>|pose <base> <shoulder> <elbow> <gripper>|run <script>|record <script> <log.jsonl>>> [--json]",
     )
 }
 
@@ -145,6 +175,7 @@ fn parse_cli_command(args: Vec<String>) -> Result<CliCommand, String> {
         "summarize" => parse_summarize_log_command(&args),
         "check" => parse_check_script_command(&args),
         "expand" => parse_expand_script_command(&args),
+        "serve" => expect_exact_args(args, 1).map(|_| CliCommand::Serve),
         "run" => parse_run_script_command(&args),
         "record" => parse_record_script_command(&args),
         "note" => parse_note_command(&args),
@@ -166,7 +197,38 @@ fn run_script(session: &mut ArmSession, script_path: &str) -> Result<(), String>
     let commands = load_script_commands(script_path, ArmConfig::f446re_mg90s())?;
 
     for command in &commands {
-        execute_command(session, command)?;
+        execute_command(session, command, OutputMode::Text, None)?;
+    }
+
+    Ok(())
+}
+
+fn serve_commands(session: &mut ArmSession, output_mode: OutputMode) -> Result<(), String> {
+    let stdin = io::stdin();
+
+    for line in stdin.lock().lines() {
+        let line = line.map_err(|error| format!("failed to read stdin: {error}"))?;
+        match parse_request_line(&line) {
+            Ok(Some(request)) => {
+                if let Err(error) = execute_command(
+                    session,
+                    &request.command,
+                    output_mode,
+                    request.request_id.as_deref(),
+                ) {
+                    print_error_result(
+                        script_command_name(&request.command),
+                        &error,
+                        output_mode,
+                        request.request_id.as_deref(),
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                print_error_result("parse", &error, output_mode, None);
+            }
+        }
     }
 
     Ok(())
@@ -176,24 +238,33 @@ fn run_script_with_log(
     session: &mut ArmSession,
     script_path: &str,
     log_path: &str,
+    output_mode: OutputMode,
 ) -> Result<(), String> {
     let commands = load_script_commands(script_path, ArmConfig::f446re_mg90s())?;
     let mut log = ExecutionLog::create(log_path)?;
 
     for command in &commands {
-        execute_command_with_log(session, command, &mut log)?;
+        execute_command_with_log(session, command, &mut log, output_mode)?;
     }
 
     Ok(())
 }
 
-fn execute_command(session: &mut ArmSession, command: &CliCommand) -> Result<(), String> {
+fn execute_command(
+    session: &mut ArmSession,
+    command: &CliCommand,
+    output_mode: OutputMode,
+    request_id: Option<&str>,
+) -> Result<(), String> {
     match command {
+        CliCommand::Serve => Err(String::from(
+            "`serve` cannot be invoked inside an active session",
+        )),
         CliCommand::RunScript(script_path) => run_script(session, script_path),
         CliCommand::RecordScript {
             script_path,
             log_path,
-        } => run_script_with_log(session, script_path, log_path),
+        } => run_script_with_log(session, script_path, log_path, output_mode),
         CliCommand::SummarizeLog(log_path) => {
             let summary = summarize_log_file(log_path)?;
             println!("{}", render_log_summary(&summary));
@@ -201,7 +272,7 @@ fn execute_command(session: &mut ArmSession, command: &CliCommand) -> Result<(),
         }
         CliCommand::CheckScript(script_path) => {
             let _ = load_script_commands(script_path, ArmConfig::f446re_mg90s())?;
-            println!("OK");
+            print_ok_result(command, output_mode, request_id);
             Ok(())
         }
         CliCommand::ExpandScript(script_path) => {
@@ -210,56 +281,84 @@ fn execute_command(session: &mut ArmSession, command: &CliCommand) -> Result<(),
             Ok(())
         }
         CliCommand::Note(text) => {
-            println!("NOTE {text}");
+            print_note_result(text, output_mode, request_id);
             Ok(())
         }
         CliCommand::Limits => {
-            println!("{}", render_limits(ArmConfig::f446re_mg90s()));
+            match output_mode {
+                OutputMode::Text => println!("{}", render_limits(ArmConfig::f446re_mg90s())),
+                OutputMode::Json => println!(
+                    "{}",
+                    render_limits_output(ArmConfig::f446re_mg90s(), request_id)
+                ),
+            }
             Ok(())
         }
         CliCommand::Wait { duration_ms } => {
-            println!("{}", session.wait(*duration_ms)?.to_line());
+            print_status_result(
+                command,
+                session.wait(*duration_ms)?,
+                output_mode,
+                request_id,
+            );
             Ok(())
         }
         CliCommand::Status => {
-            println!("{}", session.status()?.to_line());
+            print_status_result(command, session.status()?, output_mode, request_id);
             Ok(())
         }
         CliCommand::ClearFault => {
             session.clear_fault()?;
-            println!("OK");
+            print_ok_result(command, output_mode, request_id);
             Ok(())
         }
         CliCommand::Arm => {
             session.arm()?;
-            println!("OK");
+            print_ok_result(command, output_mode, request_id);
             Ok(())
         }
         CliCommand::Disarm => {
             session.disarm()?;
-            println!("OK");
+            print_ok_result(command, output_mode, request_id);
             Ok(())
         }
         CliCommand::Home => {
-            println!("{}", session.home()?.to_line());
+            print_status_result(command, session.home()?, output_mode, request_id);
             Ok(())
         }
         CliCommand::OpenGripper => {
-            println!("{}", session.open_gripper()?.to_line());
+            print_status_result(command, session.open_gripper()?, output_mode, request_id);
             Ok(())
         }
         CliCommand::CloseGripper => {
-            println!("{}", session.close_gripper()?.to_line());
+            print_status_result(command, session.close_gripper()?, output_mode, request_id);
             Ok(())
         }
         CliCommand::MoveJoint { joint, angle_deg } => {
-            println!("{}", session.move_joint(*joint, *angle_deg)?.to_line());
+            print_status_result(
+                command,
+                session.move_joint(*joint, *angle_deg)?,
+                output_mode,
+                request_id,
+            );
             Ok(())
         }
         CliCommand::MovePose(pose) => {
-            println!("{}", session.move_pose(*pose)?.to_line());
+            print_status_result(command, session.move_pose(*pose)?, output_mode, request_id);
             Ok(())
         }
+    }
+}
+
+fn print_error_result(
+    command: &str,
+    message: &str,
+    output_mode: OutputMode,
+    request_id: Option<&str>,
+) {
+    match output_mode {
+        OutputMode::Text => println!("ERR kind=COMMAND code={message}"),
+        OutputMode::Json => println!("{}", render_error_output(command, message, request_id)),
     }
 }
 
@@ -397,6 +496,56 @@ fn parse_script_line(line: &str) -> Result<Option<CliCommand>, String> {
     parse_cli_command(parts).map(Some)
 }
 
+fn parse_request_line(line: &str) -> Result<Option<ParsedRequest>, String> {
+    let trimmed = line.trim();
+    if trimmed.starts_with('{') {
+        return parse_json_request_line(trimmed).map(Some);
+    }
+
+    parse_script_line(line).map(|command| {
+        command.map(|command| ParsedRequest {
+            command,
+            request_id: None,
+        })
+    })
+}
+
+fn parse_json_request_line(line: &str) -> Result<ParsedRequest, String> {
+    let command = extract_json_string(line, "command")?;
+    let request_id = extract_optional_json_string(line, "id").map(str::to_owned);
+
+    let command = match command {
+        "limits" => CliCommand::Limits,
+        "status" => CliCommand::Status,
+        "clear-fault" => CliCommand::ClearFault,
+        "arm" => CliCommand::Arm,
+        "disarm" => CliCommand::Disarm,
+        "home" => CliCommand::Home,
+        "open" => CliCommand::OpenGripper,
+        "close" => CliCommand::CloseGripper,
+        "wait" => CliCommand::Wait {
+            duration_ms: extract_json_number::<u64>(line, "duration_ms")?,
+        },
+        "note" => CliCommand::Note(extract_json_string(line, "text")?.to_owned()),
+        "joint" => CliCommand::MoveJoint {
+            joint: parse_joint_name(extract_json_string(line, "joint")?)?,
+            angle_deg: extract_json_number::<u16>(line, "angle_deg")?,
+        },
+        "pose" => CliCommand::MovePose(ArmPose {
+            base: extract_json_number::<u16>(line, "base")?,
+            shoulder: extract_json_number::<u16>(line, "shoulder")?,
+            elbow: extract_json_number::<u16>(line, "elbow")?,
+            gripper: extract_json_number::<u16>(line, "gripper")?,
+        }),
+        other => return Err(format!("unsupported json command `{other}`")),
+    };
+
+    Ok(ParsedRequest {
+        command,
+        request_id,
+    })
+}
+
 fn load_script_commands(script_path: &str, config: ArmConfig) -> Result<Vec<CliCommand>, String> {
     let script = fs::read_to_string(script_path)
         .map_err(|error| format!("failed to read {script_path}: {error}"))?;
@@ -404,6 +553,12 @@ fn load_script_commands(script_path: &str, config: ArmConfig) -> Result<Vec<CliC
 
     for (line_number, line) in script.lines().enumerate() {
         match parse_script_line(line) {
+            Ok(Some(CliCommand::Serve)) => {
+                return Err(format!(
+                    "line {} in {script_path}: nested `serve` is not allowed",
+                    line_number + 1
+                ));
+            }
             Ok(Some(CliCommand::RunScript(_))) => {
                 return Err(format!(
                     "line {} in {script_path}: nested `run` is not allowed",
@@ -511,9 +666,11 @@ fn validate_script_commands(commands: &[CliCommand], config: ArmConfig) -> Resul
 #[cfg(test)]
 mod tests {
     use super::{
-        CliCommand, ExecutionLog, Invocation, LogEvent, parse_cli_command, parse_invocation,
-        parse_script_line, render_expanded_commands, render_limits, render_log_event,
-        render_log_summary, summarize_log_text, validate_command, validate_script_commands,
+        CliCommand, ExecutionLog, Invocation, LogEvent, OutputMode, ParsedRequest,
+        parse_cli_command, parse_invocation, parse_request_line, parse_script_line,
+        render_error_output, render_expanded_commands, render_limits, render_limits_output,
+        render_log_event, render_log_summary, render_status_output, split_output_mode,
+        summarize_log_text, validate_command, validate_script_commands,
     };
     use arm_firmware::{ArmConfig, ArmPose, ArmStatus, Fault, Joint, Snapshot};
     use std::{
@@ -554,6 +711,14 @@ mod tests {
         assert_eq!(
             parse_cli_command(strings(&["run", "demo.arm"])),
             Ok(CliCommand::RunScript(String::from("demo.arm")))
+        );
+    }
+
+    #[test]
+    fn parses_serve_commands() {
+        assert_eq!(
+            parse_cli_command(strings(&["serve"])),
+            Ok(CliCommand::Serve)
         );
     }
 
@@ -677,6 +842,33 @@ mod tests {
     }
 
     #[test]
+    fn parses_online_serve_invocations_with_a_device() {
+        assert_eq!(
+            parse_invocation(strings(&["/dev/ttyACM0", "serve"])),
+            Ok(Invocation::Online {
+                device_path: String::from("/dev/ttyACM0"),
+                command: CliCommand::Serve,
+            })
+        );
+    }
+
+    #[test]
+    fn strips_json_output_mode_from_the_end_of_args() {
+        assert_eq!(
+            split_output_mode(strings(&["/dev/ttyACM0", "status", "--json"])),
+            (strings(&["/dev/ttyACM0", "status"]), OutputMode::Json)
+        );
+    }
+
+    #[test]
+    fn keeps_text_output_mode_without_the_json_flag() {
+        assert_eq!(
+            split_output_mode(strings(&["limits"])),
+            (strings(&["limits"]), OutputMode::Text)
+        );
+    }
+
+    #[test]
     fn parses_wait_commands() {
         assert_eq!(
             parse_cli_command(strings(&["wait", "750"])),
@@ -713,6 +905,82 @@ mod tests {
         assert_eq!(
             parse_script_line("note open gripper"),
             Ok(Some(CliCommand::Note(String::from("open gripper"))))
+        );
+    }
+
+    #[test]
+    fn parses_json_status_request_lines() {
+        assert_eq!(
+            parse_request_line("{\"command\":\"status\"}"),
+            Ok(Some(ParsedRequest {
+                command: CliCommand::Status,
+                request_id: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn parses_json_limits_request_lines() {
+        assert_eq!(
+            parse_request_line("{\"command\":\"limits\"}"),
+            Ok(Some(ParsedRequest {
+                command: CliCommand::Limits,
+                request_id: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn parses_json_joint_request_lines() {
+        assert_eq!(
+            parse_request_line("{\"command\":\"joint\",\"joint\":\"base\",\"angle_deg\":120}"),
+            Ok(Some(ParsedRequest {
+                command: CliCommand::MoveJoint {
+                    joint: Joint::Base,
+                    angle_deg: 120,
+                },
+                request_id: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn parses_json_pose_request_lines() {
+        assert_eq!(
+            parse_request_line(
+                "{\"command\":\"pose\",\"base\":90,\"shoulder\":95,\"elbow\":100,\"gripper\":120}"
+            ),
+            Ok(Some(ParsedRequest {
+                command: CliCommand::MovePose(ArmPose {
+                    base: 90,
+                    shoulder: 95,
+                    elbow: 100,
+                    gripper: 120,
+                }),
+                request_id: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn parses_json_request_ids() {
+        assert_eq!(
+            parse_request_line("{\"id\":\"req-7\",\"command\":\"status\"}"),
+            Ok(Some(ParsedRequest {
+                command: CliCommand::Status,
+                request_id: Some(String::from("req-7")),
+            }))
+        );
+    }
+
+    #[test]
+    fn parses_json_request_lines_with_whitespace() {
+        assert_eq!(
+            parse_request_line("{\"id\": \"req-7\", \"command\": \"limits\"}"),
+            Ok(Some(ParsedRequest {
+                command: CliCommand::Limits,
+                request_id: Some(String::from("req-7")),
+            }))
         );
     }
 
@@ -791,7 +1059,17 @@ mod tests {
         assert_eq!(
             render_limits(ArmConfig::f446re_mg90s()),
             String::from(
-                "{\"base\":{\"min_deg\":0,\"max_deg\":180,\"home_deg\":90},\"shoulder\":{\"min_deg\":50,\"max_deg\":120,\"home_deg\":90},\"elbow\":{\"min_deg\":50,\"max_deg\":125,\"home_deg\":100},\"gripper\":{\"min_deg\":18,\"max_deg\":120,\"home_deg\":120,\"closed_deg\":60},\"heartbeat_timeout_ms\":2000,\"servo_voltage_min_mv\":4700}"
+                "{\"base\":{\"min_deg\":0,\"max_deg\":180,\"home_deg\":90},\"shoulder\":{\"min_deg\":50,\"max_deg\":120,\"home_deg\":90},\"elbow\":{\"min_deg\":50,\"max_deg\":125,\"home_deg\":100},\"gripper\":{\"min_deg\":18,\"max_deg\":120,\"home_deg\":120,\"closed_deg\":38},\"heartbeat_timeout_ms\":2000,\"servo_voltage_min_mv\":4700}"
+            )
+        );
+    }
+
+    #[test]
+    fn renders_limits_output_with_request_ids() {
+        assert_eq!(
+            render_limits_output(ArmConfig::f446re_mg90s(), Some("req-7")),
+            String::from(
+                "{\"id\":\"req-7\",\"kind\":\"limits\",\"base\":{\"min_deg\":0,\"max_deg\":180,\"home_deg\":90},\"shoulder\":{\"min_deg\":50,\"max_deg\":120,\"home_deg\":90},\"elbow\":{\"min_deg\":50,\"max_deg\":125,\"home_deg\":100},\"gripper\":{\"min_deg\":18,\"max_deg\":120,\"home_deg\":120,\"closed_deg\":38},\"heartbeat_timeout_ms\":2000,\"servo_voltage_min_mv\":4700}"
             )
         );
     }
@@ -848,13 +1126,89 @@ mod tests {
                         moving: false,
                         active_joint: None,
                         servo_voltage_mv: Some(5032),
-                        current_deg: [90, 90, 100, 60],
-                        target_deg: [90, 90, 100, 60],
+                        current_deg: [90, 90, 100, 38],
+                        target_deg: [90, 90, 100, 38],
                     },
                 },
             }),
             String::from(
-                "{\"t_ms\":75,\"kind\":\"status\",\"command\":\"close\",\"seq\":7,\"armed\":true,\"fault\":\"BROWNOUT\",\"moving\":false,\"active\":\"NONE\",\"voltage_mv\":5032,\"current\":[90,90,100,60],\"target\":[90,90,100,60]}"
+                "{\"t_ms\":75,\"kind\":\"status\",\"command\":\"close\",\"seq\":7,\"armed\":true,\"fault\":\"BROWNOUT\",\"moving\":false,\"active\":\"NONE\",\"voltage_mv\":5032,\"current\":[90,90,100,38],\"target\":[90,90,100,38]}"
+            )
+        );
+    }
+
+    #[test]
+    fn renders_status_output_as_stable_json() {
+        assert_eq!(
+            render_status_output(
+                "status",
+                ArmStatus {
+                    seq: 7,
+                    snapshot: Snapshot {
+                        armed: true,
+                        fault: Some(Fault::Brownout),
+                        moving: false,
+                        active_joint: None,
+                        servo_voltage_mv: Some(5032),
+                        current_deg: [90, 90, 100, 38],
+                        target_deg: [90, 90, 100, 38],
+                    },
+                },
+                OutputMode::Json,
+                None,
+            ),
+            String::from(
+                "{\"kind\":\"status\",\"command\":\"status\",\"seq\":7,\"armed\":true,\"fault\":\"BROWNOUT\",\"moving\":false,\"active\":\"NONE\",\"voltage_mv\":5032,\"current\":[90,90,100,38],\"target\":[90,90,100,38]}"
+            )
+        );
+    }
+
+    #[test]
+    fn renders_status_output_with_request_ids() {
+        assert_eq!(
+            render_status_output(
+                "status",
+                ArmStatus {
+                    seq: 7,
+                    snapshot: Snapshot {
+                        armed: true,
+                        fault: Some(Fault::Brownout),
+                        moving: false,
+                        active_joint: None,
+                        servo_voltage_mv: Some(5032),
+                        current_deg: [90, 90, 100, 38],
+                        target_deg: [90, 90, 100, 38],
+                    },
+                },
+                OutputMode::Json,
+                Some("req-7"),
+            ),
+            String::from(
+                "{\"id\":\"req-7\",\"kind\":\"status\",\"command\":\"status\",\"seq\":7,\"armed\":true,\"fault\":\"BROWNOUT\",\"moving\":false,\"active\":\"NONE\",\"voltage_mv\":5032,\"current\":[90,90,100,38],\"target\":[90,90,100,38]}"
+            )
+        );
+    }
+
+    #[test]
+    fn renders_error_output_as_stable_json() {
+        assert_eq!(
+            render_error_output(
+                "joint",
+                "shoulder angle 40 is outside the calibrated range 50..120",
+                None,
+            ),
+            String::from(
+                "{\"kind\":\"error\",\"command\":\"joint\",\"message\":\"shoulder angle 40 is outside the calibrated range 50..120\"}"
+            )
+        );
+    }
+
+    #[test]
+    fn renders_error_output_with_request_ids() {
+        assert_eq!(
+            render_error_output("parse", "missing string field `command`", Some("req-7")),
+            String::from(
+                "{\"id\":\"req-7\",\"kind\":\"error\",\"command\":\"parse\",\"message\":\"missing string field `command`\"}"
             )
         );
     }
@@ -887,7 +1241,7 @@ mod tests {
                 "{\"t_ms\":2,\"kind\":\"ok\",\"command\":\"clear-fault\"}\n",
                 "{\"t_ms\":16,\"kind\":\"status\",\"command\":\"status\",\"seq\":225,\"armed\":true,\"fault\":\"NONE\",\"moving\":false,\"active\":\"NONE\",\"voltage_mv\":5148,\"current\":[90,90,100,120],\"target\":[90,90,100,120]}\n",
                 "{\"t_ms\":16,\"kind\":\"note\",\"text\":\"close gripper\"}\n",
-                "{\"t_ms\":1760,\"kind\":\"status\",\"command\":\"close\",\"seq\":229,\"armed\":true,\"fault\":\"NONE\",\"moving\":false,\"active\":\"NONE\",\"voltage_mv\":5138,\"current\":[90,90,100,60],\"target\":[90,90,100,60]}\n"
+                "{\"t_ms\":1760,\"kind\":\"status\",\"command\":\"close\",\"seq\":229,\"armed\":true,\"fault\":\"NONE\",\"moving\":false,\"active\":\"NONE\",\"voltage_mv\":5138,\"current\":[90,90,100,38],\"target\":[90,90,100,38]}\n"
             ),
         )
         .expect("summary parsing should succeed");
@@ -895,7 +1249,7 @@ mod tests {
         assert_eq!(
             render_log_summary(&summary),
             String::from(
-                "{\"total_events\":4,\"ok_events\":1,\"note_events\":1,\"status_events\":2,\"error_events\":0,\"duration_ms\":1760,\"min_voltage_mv\":5138,\"max_voltage_mv\":5148,\"final_fault\":\"NONE\",\"final_current\":[90,90,100,60],\"final_target\":[90,90,100,60]}"
+                "{\"total_events\":4,\"ok_events\":1,\"note_events\":1,\"status_events\":2,\"error_events\":0,\"duration_ms\":1760,\"min_voltage_mv\":5138,\"max_voltage_mv\":5148,\"final_fault\":\"NONE\",\"final_current\":[90,90,100,38],\"final_target\":[90,90,100,38]}"
             )
         );
     }
@@ -1074,15 +1428,16 @@ fn execute_command_with_log(
     session: &mut ArmSession,
     command: &CliCommand,
     log: &mut ExecutionLog,
+    output_mode: OutputMode,
 ) -> Result<(), String> {
     let result = match command {
         CliCommand::Note(text) => {
-            println!("NOTE {text}");
+            print_note_result(text, output_mode, None);
             log.write_note(text)
         }
         CliCommand::Wait { duration_ms } => match session.wait(*duration_ms) {
             Ok(status) => {
-                println!("{}", status.to_line());
+                print_status_result(command, status, output_mode, None);
                 log.write_status(command, status)
             }
             Err(error) => {
@@ -1092,7 +1447,7 @@ fn execute_command_with_log(
         },
         CliCommand::Status => match session.status() {
             Ok(status) => {
-                println!("{}", status.to_line());
+                print_status_result(command, status, output_mode, None);
                 log.write_status(command, status)
             }
             Err(error) => {
@@ -1102,7 +1457,7 @@ fn execute_command_with_log(
         },
         CliCommand::ClearFault => match session.clear_fault() {
             Ok(()) => {
-                println!("OK");
+                print_ok_result(command, output_mode, None);
                 log.write_ok(command)
             }
             Err(error) => {
@@ -1112,7 +1467,7 @@ fn execute_command_with_log(
         },
         CliCommand::Arm => match session.arm() {
             Ok(()) => {
-                println!("OK");
+                print_ok_result(command, output_mode, None);
                 log.write_ok(command)
             }
             Err(error) => {
@@ -1122,7 +1477,7 @@ fn execute_command_with_log(
         },
         CliCommand::Disarm => match session.disarm() {
             Ok(()) => {
-                println!("OK");
+                print_ok_result(command, output_mode, None);
                 log.write_ok(command)
             }
             Err(error) => {
@@ -1132,7 +1487,7 @@ fn execute_command_with_log(
         },
         CliCommand::Home => match session.home() {
             Ok(status) => {
-                println!("{}", status.to_line());
+                print_status_result(command, status, output_mode, None);
                 log.write_status(command, status)
             }
             Err(error) => {
@@ -1142,7 +1497,7 @@ fn execute_command_with_log(
         },
         CliCommand::OpenGripper => match session.open_gripper() {
             Ok(status) => {
-                println!("{}", status.to_line());
+                print_status_result(command, status, output_mode, None);
                 log.write_status(command, status)
             }
             Err(error) => {
@@ -1152,7 +1507,7 @@ fn execute_command_with_log(
         },
         CliCommand::CloseGripper => match session.close_gripper() {
             Ok(status) => {
-                println!("{}", status.to_line());
+                print_status_result(command, status, output_mode, None);
                 log.write_status(command, status)
             }
             Err(error) => {
@@ -1163,7 +1518,7 @@ fn execute_command_with_log(
         CliCommand::MoveJoint { joint, angle_deg } => {
             match session.move_joint(*joint, *angle_deg) {
                 Ok(status) => {
-                    println!("{}", status.to_line());
+                    print_status_result(command, status, output_mode, None);
                     log.write_status(command, status)
                 }
                 Err(error) => {
@@ -1174,7 +1529,7 @@ fn execute_command_with_log(
         }
         CliCommand::MovePose(pose) => match session.move_pose(*pose) {
             Ok(status) => {
-                println!("{}", status.to_line());
+                print_status_result(command, status, output_mode, None);
                 log.write_status(command, status)
             }
             Err(error) => {
@@ -1183,6 +1538,7 @@ fn execute_command_with_log(
             }
         },
         CliCommand::RunScript(_)
+        | CliCommand::Serve
         | CliCommand::RecordScript { .. }
         | CliCommand::SummarizeLog(_)
         | CliCommand::CheckScript(_)
@@ -1196,6 +1552,127 @@ fn execute_command_with_log(
     };
 
     result
+}
+
+fn print_ok_result(command: &CliCommand, output_mode: OutputMode, request_id: Option<&str>) {
+    match output_mode {
+        OutputMode::Text => println!("OK"),
+        OutputMode::Json => println!(
+            "{}",
+            render_ok_output(script_command_name(command), request_id)
+        ),
+    }
+}
+
+fn print_note_result(text: &str, output_mode: OutputMode, request_id: Option<&str>) {
+    match output_mode {
+        OutputMode::Text => println!("NOTE {text}"),
+        OutputMode::Json => println!("{}", render_note_output(text, request_id)),
+    }
+}
+
+fn print_status_result(
+    command: &CliCommand,
+    status: ArmStatus,
+    output_mode: OutputMode,
+    request_id: Option<&str>,
+) {
+    match output_mode {
+        OutputMode::Text => println!("{}", status.to_line()),
+        OutputMode::Json => {
+            println!(
+                "{}",
+                render_status_output(
+                    script_command_name(command),
+                    status,
+                    output_mode,
+                    request_id
+                )
+            )
+        }
+    }
+}
+
+fn render_ok_output(command: &str, request_id: Option<&str>) -> String {
+    format!(
+        "{{{}{}}}",
+        render_json_id_prefix(request_id),
+        format!("\"kind\":\"ok\",\"command\":\"{}\"", escape_json(command))
+    )
+}
+
+fn render_note_output(text: &str, request_id: Option<&str>) -> String {
+    format!(
+        "{{{}{}}}",
+        render_json_id_prefix(request_id),
+        format!("\"kind\":\"note\",\"text\":\"{}\"", escape_json(text))
+    )
+}
+
+fn render_error_output(command: &str, message: &str, request_id: Option<&str>) -> String {
+    format!(
+        "{{{}{}}}",
+        render_json_id_prefix(request_id),
+        format!(
+            "\"kind\":\"error\",\"command\":\"{}\",\"message\":\"{}\"",
+            escape_json(command),
+            escape_json(message)
+        )
+    )
+}
+
+fn render_status_output(
+    command: &str,
+    status: ArmStatus,
+    output_mode: OutputMode,
+    request_id: Option<&str>,
+) -> String {
+    match output_mode {
+        OutputMode::Text => status.to_line(),
+        OutputMode::Json => {
+            let snapshot = status.snapshot;
+            format!(
+                concat!(
+                    "{{",
+                    "{}",
+                    "\"kind\":\"status\",",
+                    "\"command\":\"{}\",",
+                    "\"seq\":{},",
+                    "\"armed\":{},",
+                    "\"fault\":\"{}\",",
+                    "\"moving\":{},",
+                    "\"active\":\"{}\",",
+                    "\"voltage_mv\":{},",
+                    "\"current\":[{},{},{},{}],",
+                    "\"target\":[{},{},{},{}]",
+                    "}}"
+                ),
+                render_json_id_prefix(request_id),
+                escape_json(command),
+                status.seq,
+                snapshot.armed,
+                render_fault(snapshot.fault),
+                snapshot.moving,
+                render_active_joint(snapshot.active_joint),
+                snapshot.servo_voltage_mv.unwrap_or(0),
+                snapshot.current_deg[0],
+                snapshot.current_deg[1],
+                snapshot.current_deg[2],
+                snapshot.current_deg[3],
+                snapshot.target_deg[0],
+                snapshot.target_deg[1],
+                snapshot.target_deg[2],
+                snapshot.target_deg[3],
+            )
+        }
+    }
+}
+
+fn render_json_id_prefix(request_id: Option<&str>) -> String {
+    match request_id {
+        Some(id) => format!("\"id\":\"{}\",", escape_json(id)),
+        None => String::new(),
+    }
 }
 
 fn render_log_event(event: &LogEvent<'_>) -> String {
@@ -1325,29 +1802,47 @@ fn escape_json(value: &str) -> String {
     escaped
 }
 
+fn extract_json_field_rest<'a>(line: &'a str, key: &str) -> Result<&'a str, String> {
+    let key_prefix = format!("\"{key}\"");
+    let mut search_start = 0;
+
+    while let Some(relative_start) = line[search_start..].find(&key_prefix) {
+        let start = search_start + relative_start + key_prefix.len();
+        let rest = line[start..].trim_start();
+
+        if let Some(rest) = rest.strip_prefix(':') {
+            return Ok(rest.trim_start());
+        }
+
+        search_start += relative_start + key_prefix.len();
+    }
+
+    Err(format!("missing string field `{key}`"))
+}
+
 fn extract_json_string<'a>(line: &'a str, key: &str) -> Result<&'a str, String> {
-    let prefix = format!("\"{key}\":\"");
-    let start = line
-        .find(&prefix)
-        .ok_or_else(|| format!("missing string field `{key}`"))?
-        + prefix.len();
-    let rest = &line[start..];
+    let rest = extract_json_field_rest(line, key)?;
+    let rest = rest
+        .strip_prefix('"')
+        .ok_or_else(|| format!("missing string field `{key}`"))?;
     let end = rest
         .find('"')
         .ok_or_else(|| format!("unterminated string field `{key}`"))?;
     Ok(&rest[..end])
 }
 
+fn extract_optional_json_string<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let rest = extract_json_field_rest(line, key).ok()?;
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(&rest[..end])
+}
+
 fn extract_json_number<T>(line: &str, key: &str) -> Result<T, String>
 where
     T: core::str::FromStr,
 {
-    let prefix = format!("\"{key}\":");
-    let start = line
-        .find(&prefix)
-        .ok_or_else(|| format!("missing number field `{key}`"))?
-        + prefix.len();
-    let rest = &line[start..];
+    let rest = extract_json_field_rest(line, key)?;
     let end = rest
         .find(|ch: char| !(ch.is_ascii_digit()))
         .unwrap_or(rest.len());
@@ -1419,6 +1914,7 @@ fn joint_name(joint: Joint) -> &'static str {
 }
 
 fn render_limits(config: ArmConfig) -> String {
+    let limits = config.limits();
     format!(
         concat!(
             "{{",
@@ -1430,21 +1926,54 @@ fn render_limits(config: ArmConfig) -> String {
             "\"servo_voltage_min_mv\":{}",
             "}}"
         ),
-        config.joints[Joint::Base.index()].min_deg,
-        config.joints[Joint::Base.index()].max_deg,
-        config.joints[Joint::Base.index()].home_deg,
-        config.joints[Joint::Shoulder.index()].min_deg,
-        config.joints[Joint::Shoulder.index()].max_deg,
-        config.joints[Joint::Shoulder.index()].home_deg,
-        config.joints[Joint::Elbow.index()].min_deg,
-        config.joints[Joint::Elbow.index()].max_deg,
-        config.joints[Joint::Elbow.index()].home_deg,
-        config.joints[Joint::Gripper.index()].min_deg,
-        config.joints[Joint::Gripper.index()].max_deg,
-        config.joints[Joint::Gripper.index()].home_deg,
-        config.gripper_closed_deg,
-        config.heartbeat_timeout_ms,
-        config.servo_voltage_min_mv,
+        limits.base.min_deg,
+        limits.base.max_deg,
+        limits.base.home_deg,
+        limits.shoulder.min_deg,
+        limits.shoulder.max_deg,
+        limits.shoulder.home_deg,
+        limits.elbow.min_deg,
+        limits.elbow.max_deg,
+        limits.elbow.home_deg,
+        limits.gripper.min_deg,
+        limits.gripper.max_deg,
+        limits.gripper.home_deg,
+        limits.gripper.closed_deg,
+        limits.heartbeat_timeout_ms,
+        limits.servo_voltage_min_mv,
+    )
+}
+
+fn render_limits_output(config: ArmConfig, request_id: Option<&str>) -> String {
+    format!(
+        concat!(
+            "{{",
+            "{}",
+            "\"kind\":\"limits\",",
+            "\"base\":{{\"min_deg\":{},\"max_deg\":{},\"home_deg\":{}}},",
+            "\"shoulder\":{{\"min_deg\":{},\"max_deg\":{},\"home_deg\":{}}},",
+            "\"elbow\":{{\"min_deg\":{},\"max_deg\":{},\"home_deg\":{}}},",
+            "\"gripper\":{{\"min_deg\":{},\"max_deg\":{},\"home_deg\":{},\"closed_deg\":{}}},",
+            "\"heartbeat_timeout_ms\":{},",
+            "\"servo_voltage_min_mv\":{}",
+            "}}"
+        ),
+        render_json_id_prefix(request_id),
+        config.limits().base.min_deg,
+        config.limits().base.max_deg,
+        config.limits().base.home_deg,
+        config.limits().shoulder.min_deg,
+        config.limits().shoulder.max_deg,
+        config.limits().shoulder.home_deg,
+        config.limits().elbow.min_deg,
+        config.limits().elbow.max_deg,
+        config.limits().elbow.home_deg,
+        config.limits().gripper.min_deg,
+        config.limits().gripper.max_deg,
+        config.limits().gripper.home_deg,
+        config.limits().gripper.closed_deg,
+        config.limits().heartbeat_timeout_ms,
+        config.limits().servo_voltage_min_mv,
     )
 }
 
@@ -1466,6 +1995,7 @@ fn expanded_command_lines(command: &CliCommand) -> Vec<String> {
         CliCommand::SummarizeLog(log_path) => vec![format!("SUMMARIZE {log_path}")],
         CliCommand::CheckScript(script_path) => vec![format!("CHECK {script_path}")],
         CliCommand::ExpandScript(script_path) => vec![format!("EXPAND {script_path}")],
+        CliCommand::Serve => vec![String::from("SERVE")],
         CliCommand::Note(text) => vec![format!("NOTE {text}")],
         CliCommand::Wait { duration_ms } => vec![format!("WAIT {duration_ms}")],
         CliCommand::Limits => vec![String::from("LIMITS")],
@@ -1495,6 +2025,7 @@ fn script_command_name(command: &CliCommand) -> &'static str {
         CliCommand::Home => "home",
         CliCommand::OpenGripper => "open",
         CliCommand::CloseGripper => "close",
+        CliCommand::Serve => "serve",
         CliCommand::RunScript(_) => "run",
         CliCommand::RecordScript { .. } => "record",
         CliCommand::SummarizeLog(_) => "summarize",

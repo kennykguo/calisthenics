@@ -131,5 +131,5 @@ fn gripper_macros_use_the_calibrated_positions() {
     );
 
     controller.handle_command(1, Command::CloseGripper).unwrap();
-    assert_eq!(controller.snapshot().target_deg[Joint::Gripper.index()], 60);
+    assert_eq!(controller.snapshot().target_deg[Joint::Gripper.index()], 38);
 }

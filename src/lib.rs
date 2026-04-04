@@ -5,6 +5,8 @@
 
 mod app;
 #[cfg(feature = "host")]
+mod arm_service;
+#[cfg(feature = "host")]
 mod arm_session;
 mod byte_queue;
 mod executor;
@@ -15,6 +17,8 @@ mod servo_rail;
 mod status;
 
 pub use app::App;
+#[cfg(feature = "host")]
+pub use arm_service::{ArmServiceClient, ArmServiceReply, ArmServiceResult};
 #[cfg(feature = "host")]
 pub use arm_session::{ArmPose, ArmRequest, ArmSession, ArmStatus, parse_status_line};
 pub use byte_queue::ByteQueue;
@@ -55,6 +59,31 @@ pub struct JointConfig {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct JointLimits {
+    pub min_deg: u16,
+    pub max_deg: u16,
+    pub home_deg: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GripperLimits {
+    pub min_deg: u16,
+    pub max_deg: u16,
+    pub home_deg: u16,
+    pub closed_deg: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ArmLimits {
+    pub base: JointLimits,
+    pub shoulder: JointLimits,
+    pub elbow: JointLimits,
+    pub gripper: GripperLimits,
+    pub heartbeat_timeout_ms: u32,
+    pub servo_voltage_min_mv: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ArmConfig {
     pub joints: [JointConfig; 4],
     pub gripper_closed_deg: u16,
@@ -64,6 +93,8 @@ pub struct ArmConfig {
 
 impl ArmConfig {
     pub const fn f446re_mg90s() -> Self {
+        let gripper_min_deg = 18;
+
         Self {
             joints: [
                 JointConfig {
@@ -85,15 +116,43 @@ impl ArmConfig {
                     max_step_deg: 1,
                 },
                 JointConfig {
-                    min_deg: 18,
+                    min_deg: gripper_min_deg,
                     max_deg: 120,
                     home_deg: 120,
                     max_step_deg: 1,
                 },
             ],
-            gripper_closed_deg: 60,
+            gripper_closed_deg: gripper_min_deg + 20,
             heartbeat_timeout_ms: 2_000,
             servo_voltage_min_mv: 4700,
+        }
+    }
+
+    pub const fn limits(self) -> ArmLimits {
+        ArmLimits {
+            base: JointLimits {
+                min_deg: self.joints[Joint::Base.index()].min_deg,
+                max_deg: self.joints[Joint::Base.index()].max_deg,
+                home_deg: self.joints[Joint::Base.index()].home_deg,
+            },
+            shoulder: JointLimits {
+                min_deg: self.joints[Joint::Shoulder.index()].min_deg,
+                max_deg: self.joints[Joint::Shoulder.index()].max_deg,
+                home_deg: self.joints[Joint::Shoulder.index()].home_deg,
+            },
+            elbow: JointLimits {
+                min_deg: self.joints[Joint::Elbow.index()].min_deg,
+                max_deg: self.joints[Joint::Elbow.index()].max_deg,
+                home_deg: self.joints[Joint::Elbow.index()].home_deg,
+            },
+            gripper: GripperLimits {
+                min_deg: self.joints[Joint::Gripper.index()].min_deg,
+                max_deg: self.joints[Joint::Gripper.index()].max_deg,
+                home_deg: self.joints[Joint::Gripper.index()].home_deg,
+                closed_deg: self.gripper_closed_deg,
+            },
+            heartbeat_timeout_ms: self.heartbeat_timeout_ms,
+            servo_voltage_min_mv: self.servo_voltage_min_mv,
         }
     }
 }

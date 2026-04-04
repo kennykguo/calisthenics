@@ -1,0 +1,7 @@
+# ABOUTME: Exercises the Python arm operator script runner without commanding any motion.
+# ABOUTME: Prints calibrated limits and status snapshots while leaving the arm in its current pose.
+
+note read current limits and status
+status
+wait 500
+status
